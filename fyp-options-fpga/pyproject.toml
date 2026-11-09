@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optfpga"
+version = "0.1.0"
+description = "Black-Scholes reference implementation for FPGA options pricing"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "py_vollib",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

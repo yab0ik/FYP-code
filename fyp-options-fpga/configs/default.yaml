@@ -1,0 +1,11 @@
+input_ranges:
+  S: [50.0, 150.0]
+  K: [50.0, 150.0]
+  T: [0.1, 2.0]
+  sigma: [0.05, 0.6]
+  r: [0.0, 0.1]
+random_seed: 42
+split_ratios:
+  train: 0.7
+  val: 0.15
+  test: 0.15
