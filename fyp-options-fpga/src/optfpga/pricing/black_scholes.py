@@ -11,28 +11,31 @@ NumericResult: TypeAlias = float | NDArray[np.float64]
 
 
 def _validate_positive(name: str, value: Numeric) -> NDArray[np.float64]:
-    #Convert a value to an array and validate that it is strictly positive.
+    """Convert a value to an array and require finite, positive values."""
     array = np.asarray(value, dtype=float)
-    if np.any(array <= 0):
-        raise ValueError(f"{name} must be greater than zero")
+    if np.any(~np.isfinite(array)) or np.any(array <= 0):
+        raise ValueError(f"{name} must be finite and greater than zero")
     return array
 
 
 def d1_d2(
     S: Numeric, K: Numeric, T: Numeric, r: Numeric, sigma: Numeric
 ) -> tuple[NumericResult, NumericResult]:
-    # Return Black-Scholes ``d1`` and ``d2``.
+    """Return Black-Scholes ``d1`` and ``d2``."""
     d1, d2, _, _, _ = _calculate_d1_d2(S, K, T, r, sigma)
     return d1, d2
 
 
 def _calculate_d1_d2(
     S: Numeric, K: Numeric, T: Numeric, r: Numeric, sigma: Numeric
-) -> tuple[NumericResult, NumericResult, NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    # The calculation assumes a European option, no dividends, constant volatility,
-    # and a constant continuously compounded risk-free rate. The formulas are
-    # ``d1 = (ln(S/K) + (r + sigma**2/2)T) / (sigma*sqrt(T))`` and
-    # ``d2 = d1 - sigma*sqrt(T)``
+) -> tuple[
+    NumericResult,
+    NumericResult,
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
+    """Calculate ``d1`` and ``d2`` along with validated pricing inputs."""
     spot = _validate_positive("S", S)
     strike = _validate_positive("K", K)
     time = _validate_positive("T", T)
@@ -48,11 +51,7 @@ def _calculate_d1_d2(
 
 
 def call_price(S: Numeric, K: Numeric, T: Numeric, r: Numeric, sigma: Numeric) -> NumericResult:
-    #Return a European call price using Black-Scholes.
-
-    # Assumes no dividends, constant volatility, and a constant continuously
-    # compounded risk-free rate. The formula is
-    # ``S*N(d1) - K*exp(-r*T)*N(d2)``.
+    """Return a European call price using Black-Scholes."""
 
     d1, d2, spot, strike, time = _calculate_d1_d2(S, K, T, r, sigma)
     rate = np.asarray(r, dtype=float)
@@ -61,11 +60,8 @@ def call_price(S: Numeric, K: Numeric, T: Numeric, r: Numeric, sigma: Numeric) -
 
 
 def put_price(S: Numeric, K: Numeric, T: Numeric, r: Numeric, sigma: Numeric) -> NumericResult:
-    #Return a European put price using Black-Scholes.
-    # Assumes no dividends, constant volatility, and a constant continuously
-    # compounded risk-free rate. The formula is
-    # ``K*exp(-r*T)*N(-d2) - S*N(-d1)``.
-    
+    """Return a European put price using Black-Scholes."""
+
     d1, d2, spot, strike, time = _calculate_d1_d2(S, K, T, r, sigma)
     rate = np.asarray(r, dtype=float)
     result = strike * np.exp(-rate * time) * norm.cdf(-d2) - spot * norm.cdf(-d1)
