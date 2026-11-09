@@ -1,4 +1,4 @@
-#"""Tests for the Black-Scholes reference implementation."""
+#Tests for the Black-Scholes reference implementation.
 
 import numpy as np
 import pytest
