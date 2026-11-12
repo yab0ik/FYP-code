@@ -66,17 +66,36 @@ def test_put_price_monotonicity() -> None:
 def test_invalid_inputs_raise_value_error(name: str, index: int) -> None:
     values = [100.0, 100.0, 1.0, 0.05, 0.2]
     values[index] = 0.0
-    with pytest.raises(ValueError, match=name):
+    with pytest.raises(ValueError, match=f"{name} must be"):
         call_price(*values)
 
 
 def test_nan_input_raises_value_error() -> None:
-    with pytest.raises(ValueError, match="S"):
+    with pytest.raises(ValueError, match="S must be"):
         call_price(np.nan, 100, 1, 0.05, 0.2)
 
 
-def test_matches_py_vollib_if_installed() -> None:
-    py_vollib = pytest.importorskip("py_vollib.black_scholes")
-    flag = "c"
-    expected = py_vollib.black_scholes(flag, 100, 100, 1, 0.05, 0.2)
-    assert call_price(100, 100, 1, 0.05, 0.2) == pytest.approx(expected, abs=1e-9)
+@pytest.mark.parametrize("rate", [np.nan, np.inf])
+def test_non_finite_rate_raises_value_error(rate: float) -> None:
+    with pytest.raises(ValueError, match="r must be finite"):
+        call_price(100, 100, 1, rate, 0.2)
+
+
+@pytest.mark.parametrize("rate", [0.0, -0.01])
+def test_non_positive_finite_rate_is_valid(rate: float) -> None:
+    assert np.isfinite(call_price(100, 100, 1, rate, 0.2))
+    assert np.isfinite(put_price(100, 100, 1, rate, 0.2))
+
+
+@pytest.mark.parametrize("flag,fn", [("c", call_price), ("p", put_price)])
+def test_matches_py_vollib_on_random_inputs(flag, fn) -> None:
+    bs = pytest.importorskip("py_vollib.black_scholes").black_scholes
+    rng = np.random.default_rng(42)
+    S = rng.uniform(50, 150, 200)
+    K = rng.uniform(50, 150, 200)
+    T = rng.uniform(0.1, 2, 200)
+    r = rng.uniform(0, 0.1, 200)
+    sigma = rng.uniform(0.05, 0.6, 200)
+    for values in zip(S, K, T, r, sigma):
+        expected = bs(flag, *values)
+        assert fn(*values) == pytest.approx(expected, abs=1e-8)
