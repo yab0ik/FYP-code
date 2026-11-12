@@ -9,6 +9,8 @@ __pycache__/
 htmlcov/
 
 data/
+!src/optfpga/data/
+!src/optfpga/data/**
 results/
 
 .ipynb_checkpoints/
