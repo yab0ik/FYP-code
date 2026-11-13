@@ -19,6 +19,9 @@ dev = [
     "pytest",
     "py_vollib",
 ]
+plots = [
+    "matplotlib",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
