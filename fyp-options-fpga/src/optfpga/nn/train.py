@@ -5,6 +5,9 @@ import random
 from pathlib import Path
 from typing import Any, Iterable
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -103,7 +106,6 @@ def train_model(
         batch_size=int(used["batch_size"]),
         shuffle=True,
     )
-    train_tensor = torch.from_numpy(train_x)
     val_tensor = torch.from_numpy(val_x)
     val_target = torch.from_numpy(val_y)
 
@@ -175,6 +177,7 @@ def train_model(
         "train_losses": train_losses,
         "validation_losses": val_losses,
         "config": used,
+        "n_parameters": sum(parameter.numel() for parameter in model.parameters()),
     }
 
 

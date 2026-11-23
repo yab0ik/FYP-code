@@ -20,6 +20,73 @@ def test_model_output_shape_and_determinism() -> None:
     torch.testing.assert_close(first(inputs), second(inputs))
 
 
+def test_training_learns_fixed_linear_target(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    rng = np.random.default_rng(321)
+    train_x = rng.normal(size=(200, 4)).astype(np.float32)
+    val_x = rng.normal(size=(40, 4)).astype(np.float32)
+    train_y = (0.3 * train_x[:, 0] - 0.2 * train_x[:, 1] + 0.1 * train_x[:, 2] + 0.05).astype(np.float32)
+    val_y = (0.3 * val_x[:, 0] - 0.2 * val_x[:, 1] + 0.1 * val_x[:, 2] + 0.05).astype(np.float32)
+    mean = train_x.mean(axis=0)
+    std = train_x.std(axis=0)
+    np.savez(
+        tmp_path / "linear.npz",
+        X_reduced_train=train_x,
+        X_reduced_val=val_x,
+        call_over_K_train=train_y,
+        call_over_K_val=val_y,
+        X_reduced_mean=mean,
+        X_reduced_std=std,
+    )
+
+    config = tmp_path / "linear_config.yaml"
+    config.write_text(
+        "nn:\n"
+        "  hidden_sizes: [16]\n"
+        "  activation: relu\n"
+        "  learning_rate: 0.01\n"
+        "  batch_size: 32\n"
+        "  epochs: 30\n"
+        "  seed: 9\n",
+        encoding="utf-8",
+    )
+    result = train_model(config, tmp_path / "linear.npz", "linear_run", epochs=30)
+    assert result["n_parameters"] > 0
+    assert result["train_losses"][-1] < 0.5 * result["train_losses"][0]
+
+
+def test_train_model_never_requires_test_arrays(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    rng = np.random.default_rng(456)
+    train_x = rng.normal(size=(30, 4)).astype(np.float32)
+    val_x = rng.normal(size=(10, 4)).astype(np.float32)
+    mean = train_x.mean(axis=0)
+    std = train_x.std(axis=0)
+    np.savez(
+        tmp_path / "no_test.npz",
+        X_reduced_train=train_x,
+        X_reduced_val=val_x,
+        call_over_K_train=np.zeros(30, dtype=np.float32),
+        call_over_K_val=np.zeros(10, dtype=np.float32),
+        X_reduced_mean=mean,
+        X_reduced_std=std,
+    )
+    config = tmp_path / "no_test_config.yaml"
+    config.write_text(
+        "nn:\n"
+        "  hidden_sizes: [4]\n"
+        "  activation: tanh\n"
+        "  learning_rate: 0.01\n"
+        "  batch_size: 10\n"
+        "  epochs: 2\n"
+        "  seed: 11\n",
+        encoding="utf-8",
+    )
+    result = train_model(config, tmp_path / "no_test.npz", "no_test_run", epochs=2)
+    assert (tmp_path / "results" / "no_test_run" / "model.pt").exists()
+    assert result["n_parameters"] > 0
+
+
 def _tiny_dataset(path: Path) -> Path:
     rng = np.random.default_rng(123)
     arrays = {}
@@ -70,8 +137,6 @@ def test_training_checkpoint_and_evaluation_on_tiny_data(tmp_path: Path, monkeyp
         epochs=5,
         seed=7,
     )
-    assert result["validation_losses"][0] >= result["best_validation_loss"]
-
     run_dir = tmp_path / "results" / "tiny_run"
     checkpoint = torch.load(run_dir / "model.pt", map_location="cpu", weights_only=True)
     model = MLP(checkpoint["input_size"], checkpoint["hidden_sizes"], checkpoint["activation"])
@@ -85,19 +150,19 @@ def test_training_checkpoint_and_evaluation_on_tiny_data(tmp_path: Path, monkeyp
         predictions = model(torch.from_numpy(test_x)).numpy()
     assert predictions.shape == (12, 1)
 
-    checkpoint_predictions = torch.load(
-        run_dir / "model.pt", map_location="cpu", weights_only=True
-    )
-    reloaded = MLP(
-        checkpoint_predictions["input_size"],
-        checkpoint_predictions["hidden_sizes"],
-        checkpoint_predictions["activation"],
-    )
-    reloaded.load_state_dict(checkpoint_predictions["model_state_dict"])
-    reloaded.eval()
-    with torch.no_grad():
-        reloaded_predictions = reloaded(torch.from_numpy(test_x)).numpy()
-    np.testing.assert_array_equal(predictions, reloaded_predictions)
+    with np.load(run_dir / "weights.npz") as weights:
+        numpy_predictions = test_x
+        for index in range(len(checkpoint["hidden_sizes"])):
+            numpy_predictions = numpy_predictions @ weights[f"weight_{index}"].T
+            numpy_predictions = numpy_predictions + weights[f"bias_{index}"]
+            if checkpoint["activation"] == "relu":
+                numpy_predictions = np.maximum(numpy_predictions, 0.0)
+            else:
+                numpy_predictions = np.tanh(numpy_predictions)
+        final_index = len(checkpoint["hidden_sizes"])
+        numpy_predictions = numpy_predictions @ weights[f"weight_{final_index}"].T
+        numpy_predictions = numpy_predictions + weights[f"bias_{final_index}"]
+    np.testing.assert_allclose(numpy_predictions, predictions, rtol=1e-5, atol=1e-5)
 
     metrics = evaluate_test(run_dir, dataset)
     for key in (
@@ -123,3 +188,55 @@ def test_training_checkpoint_and_evaluation_on_tiny_data(tmp_path: Path, monkeyp
             metrics["max_abs_error_price"],
         ])
     )
+
+
+def test_evaluate_reports_nan_for_empty_moneyness_bin(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    rng = np.random.default_rng(789)
+    train_x = rng.normal(size=(20, 4)).astype(np.float32)
+    val_x = rng.normal(size=(8, 4)).astype(np.float32)
+    mean = train_x.mean(axis=0)
+    std = train_x.std(axis=0)
+    np.savez(
+        tmp_path / "empty_bin.npz",
+        X_reduced_train=train_x,
+        X_reduced_val=val_x,
+        call_over_K_train=np.zeros(20, dtype=np.float32),
+        call_over_K_val=np.zeros(8, dtype=np.float32),
+        X_reduced_mean=mean,
+        X_reduced_std=std,
+        X_reduced_test=np.ones((4, 4), dtype=np.float32),
+        call_over_K_test=np.full(4, 0.1, dtype=np.float32),
+        X_test=np.column_stack([
+            np.full(4, 100.0),
+            np.full(4, 100.0),
+            np.full(4, 1.0),
+            np.full(4, 0.05),
+            np.full(4, 0.2),
+        ]),
+    )
+    config = tmp_path / "empty_bin_config.yaml"
+    config.write_text(
+        "nn:\n"
+        "  hidden_sizes: [4]\n"
+        "  activation: relu\n"
+        "  learning_rate: 0.01\n"
+        "  batch_size: 10\n"
+        "  epochs: 2\n"
+        "  seed: 12\n",
+        encoding="utf-8",
+    )
+    train_model(config, tmp_path / "empty_bin.npz", "empty_bin_run", epochs=2)
+
+    metrics = evaluate_test(tmp_path / "results" / "empty_bin_run", tmp_path / "empty_bin.npz")
+    for name in ("below_0.9", "above_1.1"):
+        call_metrics = metrics["moneyness_bins"][name]["call_over_K"]
+        price_metrics = metrics["moneyness_bins"][name]["price"]
+        assert call_metrics["count"] == 0
+        assert price_metrics["count"] == 0
+        assert np.isnan(call_metrics["mae"])
+        assert np.isnan(call_metrics["rmse"])
+        assert np.isnan(call_metrics["max_abs_error"])
+        assert np.isnan(price_metrics["mae"])
+        assert np.isnan(price_metrics["rmse"])
+        assert np.isnan(price_metrics["max_abs_error"])

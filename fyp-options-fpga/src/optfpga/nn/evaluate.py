@@ -12,7 +12,12 @@ from optfpga.nn.model import MLP
 
 def _metrics(errors: np.ndarray) -> dict[str, float]:
     if errors.size == 0:
-        return {"mae": 0.0, "rmse": 0.0, "max_abs_error": 0.0, "count": 0.0}
+        return {
+            "mae": float("nan"),
+            "rmse": float("nan"),
+            "max_abs_error": float("nan"),
+            "count": 0.0,
+        }
     return {
         "mae": float(np.mean(np.abs(errors))),
         "rmse": float(np.sqrt(np.mean(errors ** 2))),
@@ -21,9 +26,110 @@ def _metrics(errors: np.ndarray) -> dict[str, float]:
     }
 
 
-def _finite_metrics(errors: np.ndarray) -> dict[str, float]:
-    result = _metrics(errors)
-    return {key: float(value) for key, value in result.items()}
+def compute_metrics(
+    predicted_call_over_k: np.ndarray,
+    true_call_over_k: np.ndarray,
+    full_inputs: np.ndarray,
+) -> dict[str, Any]:
+    """Compute all test metrics for call/K predictions."""
+    predicted_call_over_k = np.asarray(predicted_call_over_k, dtype=np.float64).reshape(-1)
+    true_call_over_k = np.asarray(true_call_over_k, dtype=np.float64).reshape(-1)
+    full_inputs = np.asarray(full_inputs, dtype=np.float64)
+    if predicted_call_over_k.size != true_call_over_k.size:
+        raise ValueError("predictions and true values must have equal lengths")
+    if full_inputs.shape[0] != true_call_over_k.size:
+        raise ValueError("full inputs must have one row per prediction")
+
+    call_over_k_error = predicted_call_over_k - true_call_over_k
+    strike = full_inputs[:, 1]
+    true_price = true_call_over_k * strike
+    predicted_price = predicted_call_over_k * strike
+    price_error = predicted_price - true_price
+
+    moneyness = full_inputs[:, 0] / strike
+    moneyness_bins = {
+        "below_0.9": moneyness < 0.9,
+        "0.9_to_1.1": (moneyness >= 0.9) & (moneyness <= 1.1),
+        "above_1.1": moneyness > 1.1,
+    }
+
+    volatility_time = full_inputs[:, 4] * np.sqrt(full_inputs[:, 2])
+    tercile_edges = np.quantile(volatility_time, [1.0 / 3.0, 2.0 / 3.0])
+    volatility_terciles = {
+        "tercile_1": volatility_time <= tercile_edges[0],
+        "tercile_2": (volatility_time > tercile_edges[0]) & (volatility_time <= tercile_edges[1]),
+        "tercile_3": volatility_time > tercile_edges[1],
+    }
+
+    def unit_metrics(mask: np.ndarray) -> dict[str, dict[str, float]]:
+        return {
+            "call_over_K": _metrics(call_over_k_error[mask]),
+            "price": _metrics(price_error[mask]),
+        }
+
+    moneyness_metrics = {
+        name: unit_metrics(mask)
+        for name, mask in moneyness_bins.items()
+    }
+    volatility_metrics = {
+        name: unit_metrics(mask)
+        for name, mask in volatility_terciles.items()
+    }
+
+    price_abs_error = np.abs(price_error)
+    low_price_mask = true_price < 0.1
+    reliable_price_mask = true_price > 0.1
+    low_price_metrics = _metrics(price_error[low_price_mask])
+    relative_error = (
+        price_abs_error[reliable_price_mask]
+        / np.abs(true_price[reliable_price_mask])
+        if np.any(reliable_price_mask)
+        else np.array([], dtype=np.float64)
+    )
+    relative_metrics = _metrics(relative_error)
+
+    overall = unit_metrics(np.ones(true_price.size, dtype=bool))
+    result: dict[str, Any] = {
+        "split": "test",
+        "sample_count": int(true_price.size),
+        "overall": overall,
+        "moneyness_bins": moneyness_metrics,
+        "sigma_sqrt_T_terciles": volatility_metrics,
+        "sigma_sqrt_T_tercile_edges": {
+            "lower": float(tercile_edges[0]),
+            "upper": float(tercile_edges[1]),
+        },
+        "fraction_price_error_above_0.01": float(np.mean(price_abs_error > 0.01)),
+        "fraction_price_error_above_0.1": float(np.mean(price_abs_error > 0.1)),
+        "worst_case": {
+            "call_over_K": overall["call_over_K"]["max_abs_error"],
+            "price": overall["price"]["max_abs_error"],
+        },
+        "true_price_below_0.1": {
+            "mae": low_price_metrics["mae"],
+            "rmse": low_price_metrics["rmse"],
+            "max_abs_error": low_price_metrics["max_abs_error"],
+            "count": low_price_metrics["count"],
+        },
+        "relative_error_price_above_0.1": {
+            "mae": relative_metrics["mae"],
+            "rmse": relative_metrics["rmse"],
+            "max_abs_error": relative_metrics["max_abs_error"],
+            "count": relative_metrics["count"],
+        },
+    }
+
+    overall_call = overall["call_over_K"]
+    overall_price = overall["price"]
+    result.update({
+        "mae_call_over_K": overall_call["mae"],
+        "rmse_call_over_K": overall_call["rmse"],
+        "max_abs_error_call_over_K": overall_call["max_abs_error"],
+        "mae_price": overall_price["mae"],
+        "rmse_price": overall_price["rmse"],
+        "max_abs_error_price": overall_price["max_abs_error"],
+    })
+    return result
 
 
 def evaluate_test(
@@ -64,92 +170,7 @@ def evaluate_test(
 
     with torch.no_grad():
         predicted_call_over_k = model(torch.from_numpy(test_x)).numpy().reshape(-1).astype(np.float64)
-
-    call_over_k_error = predicted_call_over_k - true_call_over_k
-    strike = test_full[:, 1]
-    true_price = true_call_over_k * strike
-    predicted_price = predicted_call_over_k * strike
-    price_error = predicted_price - true_price
-
-    moneyness = test_full[:, 0] / strike
-    moneyness_bins = {
-        "below_0.9": moneyness < 0.9,
-        "0.9_to_1.1": (moneyness >= 0.9) & (moneyness <= 1.1),
-        "above_1.1": moneyness > 1.1,
-    }
-
-    sigma = test_full[:, 4]
-    maturity = test_full[:, 2]
-    volatility_time = sigma * np.sqrt(maturity)
-    tercile_edges = np.quantile(volatility_time, [1.0 / 3.0, 2.0 / 3.0])
-    volatility_terciles = {
-        "tercile_1": volatility_time <= tercile_edges[0],
-        "tercile_2": (volatility_time > tercile_edges[0]) & (volatility_time <= tercile_edges[1]),
-        "tercile_3": volatility_time > tercile_edges[1],
-    }
-
-    def unit_metrics(mask: np.ndarray) -> dict[str, dict[str, float]]:
-        return {
-            "call_over_K": _finite_metrics(call_over_k_error[mask]),
-            "price": _finite_metrics(price_error[mask]),
-        }
-
-    moneyness_metrics = {
-        name: unit_metrics(mask)
-        for name, mask in moneyness_bins.items()
-    }
-    volatility_metrics = {
-        name: unit_metrics(mask)
-        for name, mask in volatility_terciles.items()
-    }
-
-    price_abs_error = np.abs(price_error)
-    low_price_mask = true_price < 0.1
-    reliable_price_mask = true_price > 0.1
-    low_price_metrics = _finite_metrics(price_error[low_price_mask])
-    relative_error = (
-        price_abs_error[reliable_price_mask] / np.abs(true_price[reliable_price_mask])
-        if np.any(reliable_price_mask)
-        else np.array([], dtype=np.float64)
-    )
-
-    result: dict[str, Any] = {
-        "split": "test",
-        "sample_count": int(true_price.size),
-        "overall": unit_metrics(np.ones(true_price.size, dtype=bool)),
-        "moneyness_bins": moneyness_metrics,
-        "sigma_sqrt_T_terciles": volatility_metrics,
-        "sigma_sqrt_T_tercile_edges": {
-            "lower": float(tercile_edges[0]),
-            "upper": float(tercile_edges[1]),
-        },
-        "fraction_price_error_above_0.01": float(np.mean(price_abs_error > 0.01)),
-        "fraction_price_error_above_0.1": float(np.mean(price_abs_error > 0.1)),
-        "true_price_below_0.1": {
-            "mae": low_price_metrics["mae"],
-            "rmse": low_price_metrics["rmse"],
-            "max_abs_error": low_price_metrics["max_abs_error"],
-            "count": low_price_metrics["count"],
-        },
-        "relative_error_price_above_0.1": {
-            "mae": float(np.mean(relative_error)) if relative_error.size else 0.0,
-            "rmse": float(np.sqrt(np.mean(relative_error ** 2))) if relative_error.size else 0.0,
-            "max_abs_error": float(np.max(relative_error)) if relative_error.size else 0.0,
-            "count": float(relative_error.size),
-        },
-    }
-
-    overall_call = result["overall"]["call_over_K"]
-    overall_price = result["overall"]["price"]
-    result.update({
-        "mae_call_over_K": overall_call["mae"],
-        "rmse_call_over_K": overall_call["rmse"],
-        "max_abs_error_call_over_K": overall_call["max_abs_error"],
-        "mae_price": overall_price["mae"],
-        "rmse_price": overall_price["rmse"],
-        "max_abs_error_price": overall_price["max_abs_error"],
-    })
-    return result
+    return compute_metrics(predicted_call_over_k, true_call_over_k, test_full)
 
 
 def evaluate(
