@@ -8,3 +8,11 @@ random_seed: 42
 n_train: 80000
 n_val: 10000
 n_test: 10000
+
+nn:
+  hidden_sizes: [32, 32]
+  activation: relu
+  learning_rate: 0.001
+  batch_size: 256
+  epochs: 100
+  seed: 42

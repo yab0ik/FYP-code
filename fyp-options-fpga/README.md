@@ -25,6 +25,21 @@ Run the tests with:
 pytest
 ```
 
+## Baseline neural network (objective B2)
+
+Train the baseline call/K MLP with the settings in `configs/default.yaml`:
+
+```powershell
+python src/optfpga/nn/train.py
+python src/optfpga/nn/evaluate.py results/b2_baseline
+```
+
+Run the architecture/activation sweep with:
+
+```powershell
+python scripts/sweep_b2.py
+```
+
 The optional `py_vollib` comparison test can be enabled by installing the development
 extra:
 
