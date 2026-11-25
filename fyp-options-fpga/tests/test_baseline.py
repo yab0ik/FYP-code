@@ -1,4 +1,5 @@
 import numpy as np
+from math import comb
 
 from optfpga.nn.baseline import (
     fit_polynomial_degree,
@@ -70,7 +71,9 @@ def test_test_split_is_not_used_for_degree_selection(tmp_path) -> None:
     )
 
     result = fit_polynomial_regression(tmp_path / "train_val_only.npz")
-    assert 1 <= result["chosen_degree"] <= 6
+    assert 1 <= result["chosen_degree"] <= 8
+    for row in result["degrees"]:
+        assert row["n_coefficients"] == comb(4 + row["degree"], row["degree"])
 
 
 def test_exact_degree_two_polynomial_selects_degree_at_least_two(tmp_path) -> None:
@@ -110,6 +113,9 @@ def test_exact_degree_two_polynomial_selects_degree_at_least_two(tmp_path) -> No
     assert result["chosen_degree"] >= 2
     degree_rows = {row["degree"]: row for row in result["degrees"]}
     assert degree_rows[2]["validation_mse"] < 1e-8
+    assert len(degree_rows) == 8
+    for degree, row in degree_rows.items():
+        assert row["n_coefficients"] == comb(4 + degree, degree)
 
 
 def test_compute_metrics_perfect_predictions_and_identical_paths() -> None:

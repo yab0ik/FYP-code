@@ -1,9 +1,13 @@
+import json
+import sys
+from pathlib import Path
+
 import numpy as np
 import torch
-from pathlib import Path
 
 from optfpga.nn.evaluate import evaluate_test
 from optfpga.nn.model import MLP
+import optfpga.nn.train as train_module
 from optfpga.nn.train import set_seed, train_model
 
 
@@ -18,6 +22,34 @@ def test_model_output_shape_and_determinism() -> None:
     set_seed(123)
     second = MLP(4, [16, 16], "relu")
     torch.testing.assert_close(first(inputs), second(inputs))
+
+
+def test_training_cli_resolves_default_paths_from_project_root(monkeypatch) -> None:
+    captured = {}
+
+    def fake_train_model(config_path, dataset_path, run_name, **kwargs):
+        captured.update({
+            "config_path": config_path,
+            "dataset_path": dataset_path,
+            "run_name": run_name,
+            "kwargs": kwargs,
+        })
+        return {
+            "best_validation_loss": 0.1,
+            "train_losses": [0.2],
+            "validation_losses": [0.1],
+            "best_validation_epoch": 1,
+            "run_dir": run_name,
+        }
+
+    monkeypatch.setattr(train_module, "train_model", fake_train_model)
+    monkeypatch.setattr(sys, "argv", ["train.py"])
+
+    train_module.main()
+
+    assert captured["config_path"] is None
+    assert captured["dataset_path"] == train_module.PROJECT_ROOT / "data" / "black_scholes_dataset.npz"
+    assert captured["run_name"] == str(train_module.PROJECT_ROOT / "results" / "b2_baseline")
 
 
 def test_training_learns_fixed_linear_target(tmp_path: Path, monkeypatch) -> None:
@@ -138,6 +170,11 @@ def test_training_checkpoint_and_evaluation_on_tiny_data(tmp_path: Path, monkeyp
         seed=7,
     )
     run_dir = tmp_path / "results" / "tiny_run"
+    history = json.loads((run_dir / "history.json").read_text(encoding="utf-8"))
+    assert history["epochs"] == [1, 2, 3, 4, 5]
+    assert history["train_losses"] == result["train_losses"]
+    assert history["validation_losses"] == result["validation_losses"]
+    assert result["final_validation_mse"] == result["validation_losses"][-1]
     checkpoint = torch.load(run_dir / "model.pt", map_location="cpu", weights_only=True)
     model = MLP(checkpoint["input_size"], checkpoint["hidden_sizes"], checkpoint["activation"])
     model.load_state_dict(checkpoint["model_state_dict"])

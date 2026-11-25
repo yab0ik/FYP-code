@@ -9,6 +9,12 @@ import torch
 
 from optfpga.nn.model import MLP
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _project_path(path: Path) -> Path:
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
 
 def _metrics(errors: np.ndarray) -> dict[str, float]:
     if errors.size == 0:
@@ -230,7 +236,10 @@ def main() -> None:
     parser.add_argument("--dataset", type=Path, default=Path("data/black_scholes_dataset.npz"))
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
-    evaluate(args.run, args.dataset, args.output)
+    run_path = _project_path(args.run)
+    dataset_path = _project_path(args.dataset)
+    output_path = _project_path(args.output) if args.output is not None else None
+    evaluate(run_path, dataset_path, output_path)
 
 
 if __name__ == "__main__":

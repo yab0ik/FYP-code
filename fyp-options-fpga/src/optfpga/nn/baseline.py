@@ -3,8 +3,10 @@
 import csv
 import json
 from itertools import combinations_with_replacement
+from math import comb
 from pathlib import Path
 from typing import Any
+import warnings
 
 import numpy as np
 from numpy.typing import NDArray
@@ -20,8 +22,8 @@ def polynomial_features(
     inputs = np.asarray(inputs, dtype=np.float64)
     if inputs.ndim != 2 or inputs.shape[1] != 4:
         raise ValueError("inputs must have shape (N, 4)")
-    if not 1 <= degree <= 6:
-        raise ValueError("degree must be between 1 and 6")
+    if not 1 <= degree <= 8:
+        raise ValueError("degree must be between 1 and 8")
 
     columns = [np.ones(inputs.shape[0], dtype=np.float64)]
     for current_degree in range(1, degree + 1):
@@ -77,8 +79,11 @@ def fit_polynomial_baseline(
 
 def fit_polynomial_regression(
     dataset_path: str | Path = "data/black_scholes_dataset.npz",
+    max_degree: int = 8,
 ) -> dict[str, Any]:
-    """Fit degrees 1-6 using train data and choose by validation MSE."""
+    """Fit degrees 1 through max_degree on train data and choose by validation MSE."""
+    if not 1 <= max_degree <= 8:
+        raise ValueError("max_degree must be between 1 and 8")
     models: list[dict[str, Any]] = []
     with np.load(dataset_path) as data:
         mean = data["X_reduced_mean"].astype(np.float64)
@@ -89,7 +94,7 @@ def fit_polynomial_regression(
         val_y = data["call_over_K_val"].astype(np.float64).reshape(-1)
 
     val_normalized = (val_x - mean) / std
-    for degree in range(1, 7):
+    for degree in range(1, max_degree + 1):
         val_design = polynomial_features(val_normalized, degree)
         coefficients, _, info = fit_polynomial_degree(
             train_x,
@@ -108,8 +113,17 @@ def fit_polynomial_regression(
         })
 
     chosen = min(models, key=lambda model: model["validation_mse"])
+    if chosen["degree"] == max_degree:
+        warnings.warn(
+            f"Selected polynomial degree {max_degree}, the largest searched; "
+            "consider searching higher degrees.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return {
         "chosen_degree": int(chosen["degree"]),
+        "max_degree": max_degree,
+        "chosen_validation_mse": float(chosen["validation_mse"]),
         "chosen_coefficients": chosen["coefficients"],
         "degrees": models,
         "mean": mean,
@@ -145,7 +159,7 @@ def run_baseline(
     dataset_path: str | Path = "data/black_scholes_dataset.npz",
     output_dir: str | Path = "results/baseline",
 ) -> dict[str, Any]:
-    """Fit degrees 1-6, select on validation MSE, and save baseline artifacts."""
+    """Fit degrees 1-8, select on validation MSE, and save baseline artifacts."""
     fit = fit_polynomial_regression(dataset_path)
     metrics = evaluate_polynomial(fit, dataset_path)
     output = Path(output_dir)
@@ -165,9 +179,16 @@ def run_baseline(
         for model in fit["degrees"]:
             writer.writerow({
                 "degree": model["degree"],
-                "n_coefficients": model["n_coefficients"],
+                "n_coefficients": comb(4 + model["degree"], model["degree"]),
                 "validation_mse": model["validation_mse"],
             })
+    print("Polynomial validation MSE by degree:")
+    for model in fit["degrees"]:
+        print(
+            f"  degree {model['degree']}: "
+            f"n_coefficients={comb(4 + model['degree'], model['degree'])}, "
+            f"validation_mse={model['validation_mse']:.12g}"
+        )
     return metrics
 
 

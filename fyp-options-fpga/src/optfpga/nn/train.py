@@ -1,6 +1,7 @@
 """Train and save the baseline Black-Scholes neural network."""
 
 import argparse
+import json
 import random
 from pathlib import Path
 from typing import Any, Iterable
@@ -17,6 +18,8 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from optfpga.config import load_config
 from optfpga.nn.model import MLP
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 def set_seed(seed: int) -> None:
@@ -43,6 +46,7 @@ def training_config(
     batch_size: int | None = None,
     epochs: int | None = None,
     seed: int | None = None,
+    lr_schedule: str | None = None,
 ) -> dict[str, Any]:
     nn_config = _nn_config(config)
     used = {
@@ -52,7 +56,10 @@ def training_config(
         "batch_size": batch_size if batch_size is not None else nn_config.get("batch_size", 256),
         "epochs": epochs if epochs is not None else nn_config.get("epochs", 100),
         "seed": seed if seed is not None else nn_config.get("seed", 42),
+        "lr_schedule": lr_schedule if lr_schedule is not None else nn_config.get("lr_schedule"),
     }
+    if used["lr_schedule"] not in (None, "cosine"):
+        raise ValueError("lr_schedule must be None or 'cosine'")
     return used
 
 
@@ -77,6 +84,7 @@ def train_model(
     batch_size: int | None = None,
     epochs: int | None = None,
     seed: int | None = None,
+    lr_schedule: str | None = None,
 ) -> dict[str, Any]:
     config = load_config(config_path)
     used = training_config(
@@ -87,6 +95,7 @@ def train_model(
         batch_size=batch_size,
         epochs=epochs,
         seed=seed,
+        lr_schedule=lr_schedule,
     )
     set_seed(int(used["seed"]))
 
@@ -100,6 +109,14 @@ def train_model(
 
     model = MLP(4, used["hidden_sizes"], used["activation"])
     optimizer = torch.optim.Adam(model.parameters(), lr=float(used["learning_rate"]))
+    scheduler = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=int(used["epochs"]),
+        )
+        if used["lr_schedule"] == "cosine"
+        else None
+    )
     criterion = nn.MSELoss()
     loader = DataLoader(
         TensorDataset(torch.from_numpy(train_x), torch.from_numpy(train_y)),
@@ -109,11 +126,13 @@ def train_model(
     val_tensor = torch.from_numpy(val_x)
     val_target = torch.from_numpy(val_y)
 
-    output_dir = Path("results") / run_name
+    run_path = Path(run_name)
+    output_dir = run_path if run_path.is_absolute() else Path("results") / run_path
     output_dir.mkdir(parents=True, exist_ok=True)
     train_losses: list[float] = []
     val_losses: list[float] = []
     best_val = float("inf")
+    final_val_predictions: np.ndarray | None = None
 
     for epoch in range(int(used["epochs"])):
         model.train()
@@ -129,7 +148,10 @@ def train_model(
             seen += len(batch_x)
         model.eval()
         with torch.no_grad():
-            val_loss = float(criterion(model(val_tensor), val_target).item())
+            val_predictions = model(val_tensor)
+            val_loss = float(criterion(val_predictions, val_target).item())
+            if epoch == int(used["epochs"]) - 1:
+                final_val_predictions = val_predictions.numpy().reshape(-1).astype(np.float64)
         train_losses.append(epoch_loss / seen)
         val_losses.append(val_loss)
         if val_loss < best_val:
@@ -143,6 +165,15 @@ def train_model(
                 },
                 output_dir / "model.pt",
             )
+        if scheduler is not None:
+            scheduler.step()
+
+    if final_val_predictions is None:
+        raise RuntimeError("Training completed without final validation predictions")
+    final_val_errors = final_val_predictions - val_y.reshape(-1).astype(np.float64)
+    final_validation_mse = val_losses[-1]
+    final_validation_mae = float(np.mean(np.abs(final_val_errors)))
+    final_validation_max_abs_error = float(np.max(np.abs(final_val_errors)))
 
     used_config = dict(config)
     used_config["nn"] = used
@@ -155,17 +186,35 @@ def train_model(
         X_reduced_mean=mean,
         X_reduced_std=std,
     )
+    run_label = Path(run_name).name
+    history = {
+        "epochs": list(range(1, len(train_losses) + 1)),
+        "train_losses": train_losses,
+        "validation_losses": val_losses,
+    }
+    (output_dir / "history.json").write_text(
+        json.dumps(history, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
     checkpoint = torch.load(output_dir / "model.pt", map_location="cpu", weights_only=True)
     model.load_state_dict(checkpoint["model_state_dict"])
     save_weights(model, output_dir / "weights.npz")
 
     figure, axis = plt.subplots(figsize=(8, 5))
-    axis.plot(train_losses, label="Train MSE")
-    axis.plot(val_losses, label="Validation MSE")
+    epoch_numbers = range(1, len(train_losses) + 1)
+    axis.plot(epoch_numbers, train_losses, label="Train MSE")
+    axis.plot(epoch_numbers, val_losses, label="Validation MSE")
+    best_epoch = int(np.argmin(val_losses)) + 1
+    axis.axvline(
+        best_epoch,
+        linestyle="--",
+        label=f"Best validation epoch ({best_epoch})",
+    )
+    axis.set_yscale("log")
     axis.set_xlabel("Epoch")
     axis.set_ylabel("MSE")
-    axis.set_title(f"Loss curves: {run_name}")
+    axis.set_title(f"Loss curves: {run_label} (best validation MSE={best_val:.10g})")
     axis.legend()
     figure.tight_layout()
     figure.savefig(output_dir / "loss.png", dpi=160)
@@ -178,6 +227,10 @@ def train_model(
         "validation_losses": val_losses,
         "config": used,
         "n_parameters": sum(parameter.numel() for parameter in model.parameters()),
+        "best_validation_epoch": int(np.argmin(val_losses)) + 1,
+        "final_validation_mse": final_validation_mse,
+        "final_validation_mae": final_validation_mae,
+        "final_validation_max_abs_error": final_validation_max_abs_error,
     }
 
 
@@ -186,9 +239,48 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--dataset", type=Path, default=Path("data/black_scholes_dataset.npz"))
     parser.add_argument("--run-name", default="b2_baseline")
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--lr-schedule", choices=["cosine"], default=None)
+    parser.add_argument("--hidden-sizes", type=int, nargs="+", default=None)
+    parser.add_argument("--activation", choices=["relu", "tanh"], default=None)
     args = parser.parse_args()
-    result = train_model(args.config, args.dataset, args.run_name)
+
+    dataset_path = args.dataset
+    if not dataset_path.is_absolute():
+        dataset_path = PROJECT_ROOT / dataset_path
+    config_path = args.config
+    if config_path is not None and not config_path.is_absolute():
+        config_path = PROJECT_ROOT / config_path
+    run_name = Path(args.run_name)
+    if not run_name.is_absolute():
+        run_name = PROJECT_ROOT / "results" / run_name
+
+    result = train_model(
+        config_path,
+        dataset_path,
+        str(run_name),
+        epochs=args.epochs,
+        seed=args.seed,
+        lr_schedule=args.lr_schedule,
+        hidden_sizes=args.hidden_sizes,
+        activation=args.activation,
+    )
     print(f"Best validation MSE: {result['best_validation_loss']:.10f}")
+    if len(result["validation_losses"]) > 100:
+        best_first_100 = min(result["validation_losses"][:100])
+        best_after_100 = min(result["validation_losses"][100:])
+        print(
+            f"Validation MSE after epoch 100: "
+            f"{'improved' if best_after_100 < best_first_100 else 'did not improve'} "
+            f"(best through epoch 100={best_first_100:.10f}, "
+            f"best after epoch 100={best_after_100:.10f})."
+        )
+    best_epoch = result["best_validation_epoch"]
+    epoch_index = best_epoch - 1
+    print(f"Best validation epoch: {best_epoch}")
+    print(f"Train MSE at best validation epoch: {result['train_losses'][epoch_index]:.10f}")
+    print(f"Validation MSE at best validation epoch: {result['validation_losses'][epoch_index]:.10f}")
     print(f"Saved run to {result['run_dir']}")
 
 
