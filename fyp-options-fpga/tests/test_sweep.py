@@ -2,8 +2,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import sweep_b2
@@ -80,36 +78,28 @@ def test_stale_history_retrains_and_completed_history_resumes(
     assert second["training_seconds"] == first["training_seconds"]
 
 
-def test_selection_uses_pooled_sample_standard_deviation() -> None:
+def test_selection_uses_relative_validation_mse_tolerance() -> None:
     rows = [
         {
             "hidden_sizes": [64, 64],
             "n_parameters": 100,
-            "mean_final_validation_mse": 1.0,
-            "std_final_validation_mse": 0.5,
-            "seeds": [42, 43],
+            "mean_final_validation_mse": 0.8,
         },
         {
             "hidden_sizes": [16],
             "n_parameters": 20,
-            "mean_final_validation_mse": 1.98,
-            "std_final_validation_mse": 0.6,
-            "seeds": [42, 43],
+            "mean_final_validation_mse": 1.0,
         },
         {
             "hidden_sizes": [8],
             "n_parameters": 10,
-            "mean_final_validation_mse": 2.0,
-            "std_final_validation_mse": 0.35,
-            "seeds": [42, 43],
+            "mean_final_validation_mse": 1.01,
         },
     ]
 
-    selected, best, pooled_std, threshold, eligible = sweep_b2._select_configuration(rows)
+    selected, best, threshold, eligible = sweep_b2._select_configuration(rows)
 
-    expected_pooled_std = np.sqrt((0.5 ** 2 + 0.6 ** 2 + 0.35 ** 2) / 3)
-    np.testing.assert_allclose(pooled_std, expected_pooled_std)
-    np.testing.assert_allclose(threshold, 1.0 + 2.0 * expected_pooled_std)
+    assert threshold == 1.0
     assert best["hidden_sizes"] == [64, 64]
     assert [row["hidden_sizes"] for row in eligible] == [[64, 64], [16]]
     assert selected["hidden_sizes"] == [16]
